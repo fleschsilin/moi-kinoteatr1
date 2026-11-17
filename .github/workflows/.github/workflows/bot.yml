@@ -23,8 +23,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      
       - name: Start bot
         run: python bot.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
