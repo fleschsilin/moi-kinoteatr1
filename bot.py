@@ -1,67 +1,145 @@
 
-
 import os
+import json
+import asyncio
+import logging
+from pathlib import Path
 
-from telegram import Update
-
-from telegram.ext import (
-
-    Application,
-
-    CommandHandler,
-
-    MessageHandler,
-
-    ContextTypes,
-
-    filters
-
-)
+import requests
+from telegram import Bot
+from telegram.constants import ParseMode
 
 TOKEN = os.getenv("BOT_TOKEN")
-
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+API = "https://archive.org/advancedsearch.php"
+METADATA = "https://archive.org/metadata/"
 
-    await update.message.reply_text(
+DATA_FILE = Path("published.json")
+DOWNLOAD_DIR = Path("downloads")
 
-        "🎬 Добро пожаловать в Мой кинотеатр!\n"
+DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-        "Отправь видео, чтобы опубликовать его в канале."
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
+# Не считаем фильм разрешённым только по наличию лицензии.
+# Для автоматической публикации нужны подтверждённые права
+# на скачивание и повторное распространение.
+
+
+def load_published():
+    if DATA_FILE.exists():
+        try:
+            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logging.exception("Не удалось прочитать published.json")
+    return []
+
+
+def save_published(items):
+    DATA_FILE.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2),
+        encoding="utf-8"
     )
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not CHANNEL_ID:
+def search_movies():
+    params = {
+        "q": 'mediatype:movies AND language:rus',
+        "fl[]": ["identifier", "title", "description", "licenseurl"],
+        "rows": 30,
+        "page": 1,
+        "output": "json"
+    }
 
-        await update.message.reply_text("Канал ещё не настроен.")
+    response = requests.get(API, params=params, timeout=30)
+    response.raise_for_status()
 
-        return
+    return response.json()["response"]["docs"]
 
-    await context.bot.copy_message(
 
-        chat_id=CHANNEL_ID,
+def get_video_file(identifier):
+    response = requests.get(
+        METADATA + identifier,
+        timeout=30
+    )
+    response.raise_for_status()
 
-        from_chat_id=update.effective_chat.id,
+    files = response.json().get("files", [])
 
-        message_id=update.message.message_id
+    for file in files:
+        name = file.get("name", "")
+        if name.lower().endswith(".mp4"):
+            return file
 
+    return None
+
+
+def download_movie(identifier, file_info):
+    filename = Path(file_info["name"]).name
+    destination = DOWNLOAD_DIR / filename
+
+    url = (
+        f"https://archive.org/download/"
+        f"{identifier}/{file_info['name']}"
     )
 
-    await update.message.reply_text("🎬 Фильм опубликован!")
+    with requests.get(
+        url,
+        stream=True,
+        timeout=60
+    ) as response:
+        response.raise_for_status()
 
-def main():
+        with open(destination, "wb") as output:
+            for chunk in response.iter_content(1024 * 1024):
+                if chunk:
+                    output.write(chunk)
 
-    app = Application.builder().token(TOKEN).build()
+    return destination
 
-    app.add_handler(CommandHandler("start", start))
 
-    app.add_handler(MessageHandler(filters.VIDEO, receive_video))
+async def publish_movie(bot, movie, file_path):
+    with open(file_path, "rb") as video:
+        await bot.send_video(
+            chat_id=CHANNEL_ID,
+            video=video,
+            caption=f"🎬 {movie.get('title', 'Фильм')}",
+            supports_streaming=True
+        )
 
-    app.run_polling()
+
+async def main():
+    if not TOKEN or not CHANNEL_ID:
+        raise RuntimeError("Не настроены BOT_TOKEN или CHANNEL_ID")
+
+    bot = Bot(TOKEN)
+    published = load_published()
+
+    movies = search_movies()
+
+    logging.info("Найдено фильмов: %s", len(movies))
+
+    # Пока автоматическая публикация отключена:
+    # без проверки прав и разрешения на распространение
+    # нельзя безопасно скачивать и публиковать найденные фильмы.
+    for movie in movies:
+        identifier = movie.get("identifier")
+
+        if not identifier or identifier in published:
+            continue
+
+        logging.info(
+            "Кандидат: %s (%s)",
+            movie.get("title"),
+            identifier
+        )
+
+    logging.info("Поиск завершён. Публикация ожидает проверки прав.")
+
 
 if __name__ == "__main__":
-
-    main()
+    asyncio.run(main())
