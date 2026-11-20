@@ -9,7 +9,7 @@ from scripts.prepare_movies import safe_url, safe_extract_zip, validate_redirect
 class PreparationSafetyTests(unittest.TestCase):
     def test_only_official_blender_download_host_is_allowed(self):
         self.assertEqual(
-            safe_url("https://download.blender.org/demo/movies/test.mov"),
+            safe_url("https://mirror.freedif.org/blender/demo/movies/test.mov"),
             "https://download.blender.org/demo/movies/test.mov",
         )
         for url in (
