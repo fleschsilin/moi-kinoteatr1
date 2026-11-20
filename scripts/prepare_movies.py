@@ -21,7 +21,7 @@ TARGET_BYTES = 48_000_000
 AUDIO_KBPS = 96
 MAX_SOURCE_BYTES = 3_000_000_000
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".mkv", ".webm", ".m4v"}
-ALLOWED_SOURCE_HOSTS = {"download.blender.org"}
+ALLOWED_SOURCE_HOSTS = {"mirror.freedif.org"}
 MAX_ZIP_ENTRIES = 500
 MAX_UNPACKED_BYTES = 5_000_000_000
 
