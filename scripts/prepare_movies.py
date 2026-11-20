@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -21,7 +21,13 @@ TARGET_BYTES = 48_000_000
 AUDIO_KBPS = 96
 MAX_SOURCE_BYTES = 3_000_000_000
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".mkv", ".webm", ".m4v"}
-ALLOWED_SOURCE_HOSTS = {"mirror.freedif.org"}
+MIRROR_HOSTS = (
+    "mirror.freedif.org",
+    "mirrors.iu13.net",
+    "mirror.nju.edu.cn",
+    "mirror.dotsrc.org",
+)
+ALLOWED_SOURCE_HOSTS = set(MIRROR_HOSTS)
 MAX_ZIP_ENTRIES = 500
 MAX_UNPACKED_BYTES = 5_000_000_000
 
@@ -62,32 +68,38 @@ def validate_redirect_chain(response):
 
 
 def download(url, destination):
-    safe_url(url)
+    parsed = urlparse(safe_url(url))
     destination.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
-    with requests.get(
-        url,
-        stream=True,
-        timeout=(30, 180),
-        allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; MoiKinoteatrMediaPrep/1.0)"},
-    ) as response:
-        response.raise_for_status()
-        validate_redirect_chain(response)
-        declared_size = response.headers.get("Content-Length")
-        if declared_size and int(declared_size) > MAX_SOURCE_BYTES:
-            raise ValueError("Declared source size exceeds 3 GB safety limit")
-        with destination.open("wb") as output:
-            for chunk in response.iter_content(1024 * 1024):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > MAX_SOURCE_BYTES:
-                    raise ValueError("Source download exceeded 3 GB safety limit")
-                output.write(chunk)
-    if total == 0:
-        raise ValueError("Downloaded source is empty")
-    return total
+    errors = []
+    for host in MIRROR_HOSTS:
+        mirror_url = urlunparse(parsed._replace(netloc=host))
+        total = 0
+        try:
+            with requests.get(
+                mirror_url, stream=True, timeout=(30, 180), allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; MoiKinoteatrMediaPrep/1.0)"},
+            ) as response:
+                response.raise_for_status()
+                validate_redirect_chain(response)
+                declared_size = response.headers.get("Content-Length")
+                if declared_size and int(declared_size) > MAX_SOURCE_BYTES:
+                    raise ValueError("Declared source size exceeds 3 GB safety limit")
+                with destination.open("wb") as output:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > MAX_SOURCE_BYTES:
+                            raise ValueError("Source download exceeded 3 GB safety limit")
+                        output.write(chunk)
+            if total == 0:
+                raise ValueError("Downloaded source is empty")
+            return total
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            errors.append(f"{host}: {exc}")
+            logging.warning("Mirror %s failed; trying next approved mirror", host)
+    raise RuntimeError("All Blender-listed mirrors failed: " + " | ".join(errors))
 
 
 def safe_extract_zip(archive, destination):
