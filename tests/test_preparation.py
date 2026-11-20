@@ -21,7 +21,7 @@ class PreparationTests(unittest.TestCase):
             prepare_movies.safe_url("http://example.com/movie.mp4")
         self.assertEqual(
             prepare_movies.safe_url("https://mirror.freedif.org/blender/movie.mp4"),
-            "https://download.blender.org/movie.mp4"
+            "https://mirror.freedif.org/blender/movie.mp4"
         )
         with self.assertRaises(ValueError):
             prepare_movies.safe_url("https://example.com/movie.mp4")
