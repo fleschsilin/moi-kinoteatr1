@@ -203,6 +203,7 @@ def process_candidate(candidate):
         "source_bytes": source_bytes,
         "source_sha256": sha256_file(source_path),
         "source_media_file": str(media_path.relative_to(ROOT)),
+        "source_media_sha256": sha256_file(media_path),
         "source_media_probe": source_info,
         "prepared_video": str(output_path.relative_to(ROOT)),
         **encode_info,
