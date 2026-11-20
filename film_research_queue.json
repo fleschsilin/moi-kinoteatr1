@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "purpose": "Research queue only. These entries are not approved for bot publication.",
+  "candidates": [
+    {
+      "candidate_id": "big-buck-bunny-2008",
+      "title": "Big Buck Bunny",
+      "year": 2008,
+      "director": "Sacha Goedegebure",
+      "runtime_seconds": 596,
+      "language": "und",
+      "language_note": "Dialogue-free animated short",
+      "genre": [
+        "animation",
+        "comedy"
+      ],
+      "producer": "Blender Foundation",
+      "source_page_url": "https://peach.blender.org/about/",
+      "download_page_url": "https://peach.blender.org/download/",
+      "source_download_url": "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_480p_h264.mov",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "rights_evidence_url": "https://peach.blender.org/about/",
+      "rights_basis": "Official Blender Foundation project page explicitly licenses the Peach project results under CC BY 3.0 and permits reuse and distribution, including commercially, with attribution.",
+      "required_attribution": "Include the entire credits roll when redistributing or screening the complete movie.",
+      "rights_review_status": "official_rightsholder_license_found",
+      "source_file_review_status": "pending",
+      "file_size_and_format_status": "pending",
+      "content_review_status": "pending",
+      "approval_status": "not_approved",
+      "blocking_reasons": [
+        "Official source file must be fetched and its exact format, duration, integrity and final size after Telegram-compatible encoding verified.",
+        "Complete film must be reviewed before assigning a content rating.",
+        "The required end credits must be preserved in the distributed copy."
+      ]
+    },
+    {
+      "candidate_id": "sintel-2010",
+      "title": "Sintel",
+      "year": 2010,
+      "director": "Colin Levy",
+      "runtime_seconds": 900,
+      "language": "en",
+      "genre": [
+        "animation",
+        "fantasy",
+        "adventure"
+      ],
+      "producer": "Blender Foundation",
+      "source_page_url": "https://durian.blender.org/about/",
+      "download_page_url": "https://durian.blender.org/sharing/",
+      "source_download_url": "https://download.blender.org/demo/movies/Sintel.2010.720p.mkv.zip",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "rights_evidence_url": "https://durian.blender.org/sharing/",
+      "rights_basis": "Official Durian project page states the project results are licensed under CC BY 3.0 and may be freely reused and distributed with attribution.",
+      "required_attribution": "Include the entire credits scroll when redistributing or screening the movie.",
+      "rights_review_status": "official_rightsholder_license_found",
+      "source_file_review_status": "pending",
+      "file_size_and_format_status": "pending",
+      "content_review_status": "pending",
+      "approval_status": "not_approved",
+      "blocking_reasons": [
+        "Official archive is a large ZIP/MKV package; extraction, file integrity and Telegram-compatible encoding have not been tested.",
+        "Complete film must be reviewed before assigning a content rating.",
+        "The required end credits must be preserved."
+      ]
+    },
+    {
+      "candidate_id": "tears-of-steel-2012",
+      "title": "Tears of Steel",
+      "year": 2012,
+      "director": "Ian Hubert",
+      "runtime_seconds": 720,
+      "language": "en",
+      "language_note": "Official Russian subtitle file exists; subtitle muxing has not been tested.",
+      "genre": [
+        "science_fiction",
+        "action"
+      ],
+      "producer": "Blender Institute",
+      "source_page_url": "https://mango.blender.org/about/",
+      "download_page_url": "https://mango.blender.org/production/tears-of-steel-download-watch/",
+      "source_download_url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+      "russian_subtitles_url": "https://download.blender.org/demo/movies/ToS/subtitles/TOS-ru.srt",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "rights_evidence_url": "https://mango.blender.org/about/",
+      "rights_basis": "Official Mango project page explicitly states the film is licensed under CC BY 3.0 and may be freely shared and shown when the credit scroll is retained.",
+      "required_attribution": "Keep the complete film credit scroll.",
+      "rights_review_status": "official_rightsholder_license_found",
+      "source_file_review_status": "pending",
+      "file_size_and_format_status": "pending",
+      "content_review_status": "pending",
+      "approval_status": "not_approved",
+      "blocking_reasons": [
+        "Official 720p MOV is large; Telegram-compatible re-encoding must be tested.",
+        "Russian subtitles must be checked and tested before promising a Russian-language viewing experience.",
+        "Complete film must be reviewed; official page gives age guidance 12+.",
+        "The required end credits must be preserved."
+      ]
+    }
+  ]
+}
