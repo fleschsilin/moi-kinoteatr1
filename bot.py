@@ -11,29 +11,28 @@ from telegram import Bot
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-API = "https://archive.org/advancedsearch.php"
 METADATA = "https://archive.org/metadata/"
-
 DATA_FILE = Path("published.json")
+LIBRARY_FILE = Path("library.json")
 DOWNLOAD_DIR = Path("downloads")
 
 MAX_MOVIES = 3
 MAX_SIZE = 49 * 1024 * 1024
-
-# Безопасный режим включён по умолчанию. Для публикации нужны одновременно
-# DRY_RUN=false и явный список проверенных вручную идентификаторов.
 DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() != "false"
-APPROVED_IDENTIFIERS = {
-    item.strip()
-    for item in os.getenv("APPROVED_IDENTIFIERS", "").split(",")
-    if item.strip()
-}
+TARGET_TERRITORY = "KZ"
 
-# Дополнительный фильтр очевидно опасных материалов по названию.
 BLOCKED_TITLE_TERMS = (
     "suicide", "beheading", "gore", "snuff", "ak-47",
     "3 guys 1 hammer", "three guys one hammer",
     "самоубий", "расчлен", "казнь", "терроризм",
+)
+
+ALLOWED_LICENSE_PATHS = (
+    "/publicdomain/zero/",
+    "/licenses/by/4.0/",
+    "/licenses/by-sa/4.0/",
+    "/licenses/by/3.0/",
+    "/licenses/by-sa/3.0/",
 )
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -43,69 +42,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-ALLOWED_LICENSE_PATHS = (
-    "/publicdomain/zero/",
-    "/publicdomain/mark/",
-    "/licenses/by/4.0/",
-    "/licenses/by-sa/4.0/",
-    "/licenses/by/3.0/",
-    "/licenses/by-sa/3.0/",
-)
-
 
 def title_is_allowed(title):
     normalized = str(title or "").casefold()
     return not any(term in normalized for term in BLOCKED_TITLE_TERMS)
-
-
-def is_manually_approved(identifier):
-    return identifier in APPROVED_IDENTIFIERS
-
-
-def load_published():
-    if not DATA_FILE.exists():
-        return []
-
-    try:
-        data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        logging.exception("Ошибка чтения published.json")
-        # Fail closed: не сбрасываем историю и не публикуем повторно.
-        raise RuntimeError("Не удалось безопасно прочитать published.json")
-
-
-def save_published(items):
-    DATA_FILE.write_text(
-        json.dumps(items, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-
-def search_movies():
-    params = [
-        ("q", "mediatype:movies AND language:rus"),
-        ("fl[]", "identifier"),
-        ("fl[]", "title"),
-        ("rows", "100"),
-        ("page", "1"),
-        ("output", "json"),
-        ("sort[]", "downloads desc"),
-    ]
-
-    response = requests.get(API, params=params, timeout=40)
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("response", {}).get("docs", [])
-
-
-def get_metadata(identifier):
-    response = requests.get(
-        METADATA + quote(identifier, safe=""),
-        timeout=40
-    )
-    response.raise_for_status()
-    return response.json()
 
 
 def check_license(metadata):
@@ -123,6 +63,109 @@ def check_license(metadata):
         return license_url.strip()
 
     return None
+
+
+def validate_library_entry(entry):
+    required = (
+        "identifier", "title", "year", "director", "language",
+        "synopsis", "genre", "license_url", "rights_basis",
+        "rights_evidence_url", "rights_status", "rights_territories",
+        "content_review", "reviewed_by", "reviewed_at", "approved",
+    )
+    if not isinstance(entry, dict):
+        raise ValueError("Запись фильма должна быть объектом")
+
+    missing = [key for key in required if key not in entry or entry[key] in (None, "", [])]
+    if missing:
+        raise ValueError("В записи фильма отсутствуют поля: " + ", ".join(missing))
+
+    if not isinstance(entry["year"], int) or not 1888 <= entry["year"] <= 2100:
+        raise ValueError("Некорректный год фильма: " + str(entry.get("identifier")))
+
+    if entry["approved"] is not True:
+        raise ValueError("В library.json допускаются только approved=true")
+
+    if entry["rights_status"] != "verified":
+        raise ValueError("Права не подтверждены: " + str(entry["identifier"]))
+
+    if entry["content_review"] != "passed":
+        raise ValueError("Проверка содержания не пройдена: " + str(entry["identifier"]))
+
+    if TARGET_TERRITORY not in entry["rights_territories"]:
+        raise ValueError("Нет подтверждения прав для территории KZ: " + str(entry["identifier"]))
+
+    if not title_is_allowed(entry["title"]):
+        raise ValueError("Название попало в блок-лист: " + str(entry["identifier"]))
+
+    evidence = urlparse(str(entry["rights_evidence_url"]))
+    if evidence.scheme != "https" or not evidence.netloc:
+        raise ValueError("Некорректная ссылка на доказательство прав")
+
+    license = urlparse(str(entry["license_url"]).strip().lower())
+    if license.scheme != "https" or license.hostname != "creativecommons.org":
+        raise ValueError("Разрешены только проверенные лицензии Creative Commons")
+
+    if not any(license.path.startswith(path) for path in ALLOWED_LICENSE_PATHS):
+        raise ValueError("Лицензия не входит в список разрешённых")
+
+    return entry
+
+
+def load_library():
+    if not LIBRARY_FILE.exists():
+        raise RuntimeError("Нет library.json: публикация остановлена")
+
+    try:
+        data = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError("Не удалось прочитать library.json") from exc
+
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise RuntimeError("Неверная версия схемы library.json")
+
+    films = data.get("films")
+    if not isinstance(films, list):
+        raise RuntimeError("Поле films должно быть списком")
+
+    seen = set()
+    for entry in films:
+        validate_library_entry(entry)
+        identifier = entry["identifier"]
+        if identifier in seen:
+            raise RuntimeError("Дублирующийся identifier в library.json: " + identifier)
+        seen.add(identifier)
+
+    return films
+
+
+def load_published():
+    if not DATA_FILE.exists():
+        return []
+
+    try:
+        data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+            raise ValueError("published.json должен содержать список строк")
+        return data
+    except (json.JSONDecodeError, OSError, ValueError):
+        logging.exception("Ошибка чтения published.json")
+        raise RuntimeError("Не удалось безопасно прочитать published.json")
+
+
+def save_published(items):
+    DATA_FILE.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def get_metadata(identifier):
+    response = requests.get(
+        METADATA + quote(identifier, safe=""),
+        timeout=40
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def get_video_file(metadata):
@@ -178,13 +221,16 @@ def download_movie(identifier, file_info):
     return destination
 
 
-async def publish_movie(bot, movie, file_path, license_url):
+async def publish_movie(bot, movie, file_path):
     identifier = movie["identifier"]
-    title = movie.get("title", "Фильм")
+    title = movie["title"]
     caption = (
-        f"🎬 {title}\n\n"
+        f"🎬 {title} ({movie['year']})\n"
+        f"Режиссёр: {movie['director']}\n"
+        f"Жанр: {movie['genre']}\n\n"
+        f"{movie['synopsis']}\n\n"
         f"Источник: https://archive.org/details/{identifier}\n"
-        f"Лицензия: {license_url}"
+        f"Лицензия: {movie['license_url']}"
     )
 
     with open(file_path, "rb") as video:
@@ -203,82 +249,62 @@ async def main():
     if not TOKEN or not CHANNEL_ID:
         raise RuntimeError("Не настроены BOT_TOKEN или CHANNEL_ID")
 
-    if not DRY_RUN and not APPROVED_IDENTIFIERS:
-        raise RuntimeError(
-            "Публикация заблокирована: APPROVED_IDENTIFIERS пуст. "
-            "Добавьте только вручную проверенные материалы."
-        )
+    library = load_library()
+    if not DRY_RUN and not library:
+        raise RuntimeError("Публикация заблокирована: проверенная библиотека пуста")
 
     published = load_published()
-    movies = search_movies()
-    logging.info("Найдено кандидатов: %s", len(movies))
+    logging.info("Проверенных фильмов в библиотеке: %s", len(library))
     logging.info(
-        "Режим: %s; вручную одобрено идентификаторов: %s",
-        "DRY RUN — публикация отключена" if DRY_RUN else "ПУБЛИКАЦИЯ",
-        len(APPROVED_IDENTIFIERS)
+        "Режим: %s",
+        "DRY RUN — публикация отключена" if DRY_RUN else "ПУБЛИКАЦИЯ"
     )
 
     bot = None
     count = 0
-
     if not DRY_RUN:
         bot = Bot(TOKEN)
         await bot.initialize()
 
     try:
-        for movie in movies:
+        for movie in library:
             if count >= MAX_MOVIES:
                 break
 
-            identifier = movie.get("identifier")
-            title = movie.get("title", "")
-
-            if not identifier or identifier in published:
-                continue
-
-            if not title_is_allowed(title):
-                logging.warning("Отклонено опасное название: %s", title)
-                continue
-
-            if not is_manually_approved(identifier):
-                logging.info(
-                    "Пропуск: нет ручного одобрения: %s (%s)",
-                    title, identifier
-                )
+            identifier = movie["identifier"]
+            if identifier in published:
+                logging.info("Уже опубликован: %s", identifier)
                 continue
 
             try:
-                logging.info("Проверяем одобренный материал: %s", title)
                 metadata = get_metadata(identifier)
-
-                license_url = check_license(metadata)
-                if not license_url:
-                    logging.warning("Лицензия не подтверждена: %s", identifier)
+                actual_license = check_license(metadata)
+                if not actual_license or actual_license.rstrip("/") != movie["license_url"].rstrip("/"):
+                    logging.warning("Лицензия источника не совпала с каталогом: %s", identifier)
                     continue
 
                 file_info = get_video_file(metadata)
                 if not file_info:
-                    logging.info("Подходящий MP4 не найден: %s", identifier)
+                    logging.warning("Нет подходящего MP4: %s", identifier)
                     continue
 
-                # В DRY_RUN не скачиваем файлы и не обращаемся к Telegram.
                 if DRY_RUN:
                     logging.info(
-                        "DRY RUN: кандидат прошёл метаданные и лицензию: %s",
-                        identifier
+                        "DRY RUN: проверен фильм из каталога: %s (%s)",
+                        movie["title"], identifier
                     )
                     continue
 
                 file_path = download_movie(identifier, file_info)
                 try:
-                    await publish_movie(bot, movie, file_path, license_url)
+                    await publish_movie(bot, movie, file_path)
                 finally:
                     file_path.unlink(missing_ok=True)
 
                 published.append(identifier)
                 save_published(published)
                 count += 1
-                logging.info("Опубликован фильм: %s", title)
+                logging.info("Опубликован фильм: %s", movie["title"])
 
             except Exception:
                 logging.exception("Ошибка обработки фильма %s", identifier)
