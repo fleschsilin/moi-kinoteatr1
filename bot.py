@@ -32,7 +32,8 @@ APPROVED_IDENTIFIERS = {
 # Дополнительный фильтр очевидно опасных материалов по названию.
 BLOCKED_TITLE_TERMS = (
     "suicide", "murder", "beheading", "execution", "gore", "snuff",
-    "ak-47", "убийств", "самоубий", "расчлен", "казнь",
+    "ak-47", "3 guys 1 hammer", "three guys one hammer",
+    "убийств", "самоубий", "расчлен", "казнь",
     "смертельн", "жесток", "кровав", "терроризм",
 )
 
