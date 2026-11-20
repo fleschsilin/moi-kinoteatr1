@@ -167,9 +167,8 @@ def transcode(source, destination, source_info, external_subtitle=None):
             "-movflags", "+faststart"]
     if external_subtitle:
         cmd += ["-map", "1:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=rus"]
-    else:
-        # Retain any source subtitle tracks supported by MP4's timed-text format.
-        cmd += ["-map", "0:s?", "-c:s", "mov_text"]
+    # Embedded source subtitle tracks remain intact in the preserved original master.
+    # The separately validated Russian SRT is muxed as MP4 timed text when supplied.
     cmd += [str(temp)]
     try:
         subprocess.run(cmd, check=True)
