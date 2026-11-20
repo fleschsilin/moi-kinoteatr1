@@ -1,0 +1,23 @@
+[Unit]
+Description=My Cinema Telegram Bot
+After=network-online.target telegram-bot-api.service
+Requires=telegram-bot-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=movie-bot
+Group=movie-bot
+WorkingDirectory=/opt/moi-kinoteatr1
+EnvironmentFile=/etc/movie-bot/bot.env
+ExecStart=/opt/moi-kinoteatr1/.venv/bin/python /opt/moi-kinoteatr1/bot.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/moi-kinoteatr1/downloads /opt/moi-kinoteatr1
+
+[Install]
+WantedBy=multi-user.target
