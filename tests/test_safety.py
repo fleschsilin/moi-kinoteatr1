@@ -15,6 +15,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_ordinary_title_is_not_blocked_by_keyword_filter(self):
         self.assertTrue(bot.title_is_allowed("Советский художественный фильм"))
+        self.assertTrue(bot.title_is_allowed("Она написала убийство (1984 - 1996)"))
 
     def test_license_accepts_known_cc_url(self):
         self.assertTrue(bot.check_license({
