@@ -21,6 +21,9 @@ TARGET_BYTES = 48_000_000
 AUDIO_KBPS = 96
 MAX_SOURCE_BYTES = 3_000_000_000
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".mkv", ".webm", ".m4v"}
+ALLOWED_SOURCE_HOSTS = {"download.blender.org"}
+MAX_ZIP_ENTRIES = 500
+MAX_UNPACKED_BYTES = 5_000_000_000
 
 
 def require_tool(name):
@@ -40,17 +43,34 @@ def sha256_file(path):
 
 def safe_url(url):
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("Only absolute HTTPS source URLs are accepted")
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in ALLOWED_SOURCE_HOSTS
+        or parsed.username
+        or parsed.password
+        or parsed.port not in (None, 443)
+    ):
+        raise ValueError("Source URL must use HTTPS on an approved Blender download host")
     return url
+
+
+def validate_redirect_chain(response):
+    for hop in [*response.history, response]:
+        parsed = urlparse(hop.url)
+        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_SOURCE_HOSTS:
+            raise ValueError("Download redirected outside the approved Blender host")
 
 
 def download(url, destination):
     safe_url(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
     total = 0
-    with requests.get(url, stream=True, timeout=(30, 180)) as response:
+    with requests.get(url, stream=True, timeout=(30, 180), allow_redirects=True) as response:
         response.raise_for_status()
+        validate_redirect_chain(response)
+        declared_size = response.headers.get("Content-Length")
+        if declared_size and int(declared_size) > MAX_SOURCE_BYTES:
+            raise ValueError("Declared source size exceeds 3 GB safety limit")
         with destination.open("wb") as output:
             for chunk in response.iter_content(1024 * 1024):
                 if not chunk:
@@ -68,12 +88,21 @@ def safe_extract_zip(archive, destination):
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     with zipfile.ZipFile(archive) as zf:
-        for member in zf.infolist():
+        members = zf.infolist()
+        if len(members) > MAX_ZIP_ENTRIES:
+            raise ValueError("ZIP contains too many entries")
+        unpacked = sum(member.file_size for member in members)
+        if unpacked > MAX_UNPACKED_BYTES:
+            raise ValueError("ZIP expanded size exceeds 5 GB safety limit")
+        for member in members:
             if member.is_dir():
                 continue
             target = (destination / member.filename).resolve()
             if target != root and root not in target.parents:
                 raise ValueError("Unsafe path in source ZIP archive")
+            mode = (member.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError("Symlink found in source ZIP archive")
         zf.extractall(destination)
 
 
@@ -96,6 +125,7 @@ def probe(path):
         "height": int(video.get("height", 0)),
         "video_codec": video.get("codec_name"),
         "audio_streams": sum(1 for s in data.get("streams", []) if s.get("codec_type") == "audio"),
+        "subtitle_streams": sum(1 for s in data.get("streams", []) if s.get("codec_type") == "subtitle"),
     }
 
 
@@ -185,8 +215,26 @@ def process_candidate(candidate):
         subtitle_path = out_dir / f"{cid}.ru.srt"
         subtitle_bytes = download(subtitle_url, subtitle_path)
         text = subtitle_path.read_text(encoding="utf-8-sig", errors="replace")
-        if "-->" not in text or not any(line.strip().isdigit() for line in text.splitlines()):
+        import re
+        cue_pattern = re.compile(
+            r"^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$",
+            re.MULTILINE,
+        )
+        cues = cue_pattern.findall(text)
+        if not cues or not any(line.strip().isdigit() for line in text.splitlines()):
             raise ValueError("Downloaded subtitle file does not look like valid SRT")
+        def to_ms(stamp):
+            hours, minutes, rest = stamp.split(":")
+            seconds, millis = rest.split(",")
+            return ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(millis)
+        previous_start = -1
+        for start, end in cues:
+            if to_ms(end) <= to_ms(start) or to_ms(start) < previous_start:
+                raise ValueError("Subtitle cue timestamps are invalid or out of order")
+            previous_start = to_ms(start)
+        last_end = to_ms(cues[-1][1])
+        if last_end > source_info["duration_seconds"] * 1000 + 5000:
+            raise ValueError("Subtitle file extends beyond the source film duration")
         subtitles.append({
             "language": "ru",
             "path": str(subtitle_path.relative_to(ROOT)),
@@ -209,6 +257,11 @@ def process_candidate(candidate):
         **encode_info,
         "subtitles": subtitles,
         "credits_preservation": "full source duration retained; human visual end-credit verification still required",
+        "output_container": "mp4",
+        "output_video_codec": encode_info["probe"]["video_codec"],
+        "output_audio_streams": encode_info["probe"]["audio_streams"],
+        "output_subtitle_streams": encode_info["probe"]["subtitle_streams"],
+        "telegram_size_check": "passed" if encode_info["output_bytes"] <= TARGET_BYTES else "failed",
         "content_review": "pending_human_full_film_review",
         "rights_review": "official_license_page_recorded; territory/legal review still required",
         "publication_approved": False,
