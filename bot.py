@@ -17,7 +17,11 @@ LIBRARY_FILE = Path("library.json")
 DOWNLOAD_DIR = Path("downloads")
 
 MAX_MOVIES = 3
-MAX_SIZE = 49 * 1024 * 1024
+LOCAL_BOT_API = os.getenv("TELEGRAM_LOCAL_API", "false").strip().lower() == "true"
+DEFAULT_MAX_SIZE = 1_900_000_000 if LOCAL_BOT_API else 49 * 1024 * 1024
+MAX_SIZE = int(os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_SIZE)))
+BOT_API_BASE_URL = os.getenv("BOT_API_BASE_URL", "https://api.telegram.org/bot")
+BOT_API_FILE_BASE_URL = os.getenv("BOT_API_FILE_BASE_URL", "https://api.telegram.org/file/bot")
 DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() != "false"
 TARGET_TERRITORY = "KZ"
 
@@ -263,7 +267,7 @@ async def main():
     bot = None
     count = 0
     if not DRY_RUN:
-        bot = Bot(TOKEN)
+        bot = Bot(TOKEN, base_url=BOT_API_BASE_URL, base_file_url=BOT_API_FILE_BASE_URL)
         await bot.initialize()
 
     try:
