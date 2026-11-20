@@ -161,10 +161,13 @@ def transcode(source, destination, source_info, external_subtitle=None):
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
     if external_subtitle:
         cmd += ["-i", str(external_subtitle)]
-    cmd += ["-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
+    # Preserve every embedded subtitle stream in the prepared MP4, not only in
+    # the archived original master. The Blender Sintel source contains 10 SRT tracks.
+    cmd += ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+            "-map_metadata", "0", "-map_chapters", "0",
             "-c:v", "libx264", "-preset", VIDEO_PRESET, "-crf", str(VIDEO_CRF),
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k",
-            "-movflags", "+faststart"]
+            "-c:s", "mov_text", "-movflags", "+faststart"]
     if external_subtitle:
         cmd += ["-map", "1:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=rus"]
     # Embedded source subtitle tracks remain intact in the preserved original master.
