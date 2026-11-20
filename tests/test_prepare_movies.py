@@ -7,16 +7,16 @@ from scripts.prepare_movies import safe_url, safe_extract_zip, validate_redirect
 
 
 class PreparationSafetyTests(unittest.TestCase):
-    def test_only_official_blender_download_host_is_allowed(self):
+    def test_only_approved_blender_mirrors_are_allowed(self):
         self.assertEqual(
             safe_url("https://mirror.freedif.org/blender/demo/movies/test.mov"),
-            "https://download.blender.org/demo/movies/test.mov",
+            "https://mirror.freedif.org/blender/demo/movies/test.mov",
         )
         for url in (
-            "http://download.blender.org/file.mov",
+            "http://mirror.freedif.org/blender/file.mov",
             "https://example.org/file.mov",
-            "https://download.blender.org.evil.example/file.mov",
-            "https://user:pass@download.blender.org/file.mov",
+            "https://mirror.freedif.org.evil.example/file.mov",
+            "https://user:pass@mirror.freedif.org/file.mov",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 safe_url(url)
@@ -51,7 +51,7 @@ class PreparationSafetyTests(unittest.TestCase):
             def __init__(self, url):
                 self.url = url
         class Response:
-            history = [Hop("https://download.blender.org/redirect")]
+            history = [Hop("https://mirror.freedif.org/blender/redirect")]
             url = "https://evil.example/file"
         with self.assertRaises(ValueError):
             validate_redirect_chain(Response())
