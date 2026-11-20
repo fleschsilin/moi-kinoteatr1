@@ -31,10 +31,9 @@ APPROVED_IDENTIFIERS = {
 
 # Дополнительный фильтр очевидно опасных материалов по названию.
 BLOCKED_TITLE_TERMS = (
-    "suicide", "murder", "beheading", "execution", "gore", "snuff",
-    "ak-47", "3 guys 1 hammer", "three guys one hammer",
-    "убийств", "самоубий", "расчлен", "казнь",
-    "смертельн", "жесток", "кровав", "терроризм",
+    "suicide", "beheading", "gore", "snuff", "ak-47",
+    "3 guys 1 hammer", "three guys one hammer",
+    "самоубий", "расчлен", "казнь", "терроризм",
 )
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
