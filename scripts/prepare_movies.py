@@ -4,11 +4,12 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import zipfile
-from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -17,10 +18,23 @@ QUEUE = ROOT / "film_research_queue.json"
 WORK = ROOT / "movie_work"
 OUTPUT = ROOT / "prepared_movies"
 MANIFEST = ROOT / "prepared_manifest.json"
-TARGET_BYTES = 48_000_000
-AUDIO_KBPS = 96
+VIDEO_CRF = 18
+VIDEO_PRESET = "slow"
+AUDIO_KBPS = 192
 MAX_SOURCE_BYTES = 3_000_000_000
+MAX_ZIP_ENTRIES = 500
+MAX_UNPACKED_BYTES = 5_000_000_000
+# Telegram's self-hosted Bot API documents a 2,000 MB upload ceiling.
+# Keep a margin; this is informational, not an artificial encode-size target.
+LOCAL_BOT_API_SAFE_BYTES = 1_900_000_000
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".mkv", ".webm", ".m4v"}
+MIRROR_HOSTS = (
+    "mirror.freedif.org",
+    "mirrors.iu13.net",
+    "mirror.nju.edu.cn",
+    "mirror.dotsrc.org",
+)
+ALLOWED_SOURCE_HOSTS = set(MIRROR_HOSTS)
 
 
 def require_tool(name):
@@ -40,125 +54,171 @@ def sha256_file(path):
 
 def safe_url(url):
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("Only absolute HTTPS source URLs are accepted")
+    if (parsed.scheme != "https" or parsed.hostname not in ALLOWED_SOURCE_HOSTS
+            or parsed.username or parsed.password or parsed.port not in (None, 443)):
+        raise ValueError("Source URL must use HTTPS on an approved Blender mirror")
     return url
 
 
+def validate_redirect_chain(response):
+    for hop in [*response.history, response]:
+        parsed = urlparse(hop.url)
+        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_SOURCE_HOSTS:
+            raise ValueError("Download redirected outside the approved Blender mirror hosts")
+
+
 def download(url, destination):
-    safe_url(url)
+    parsed = urlparse(safe_url(url))
     destination.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
-    with requests.get(url, stream=True, timeout=(30, 180)) as response:
-        response.raise_for_status()
-        with destination.open("wb") as output:
-            for chunk in response.iter_content(1024 * 1024):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > MAX_SOURCE_BYTES:
-                    raise ValueError("Source download exceeded 3 GB safety limit")
-                output.write(chunk)
-    if total == 0:
-        raise ValueError("Downloaded source is empty")
-    return total
+    errors = []
+    for host in MIRROR_HOSTS:
+        mirror_url = urlunparse(parsed._replace(netloc=host))
+        total = 0
+        try:
+            with requests.get(mirror_url, stream=True, timeout=(30, 180),
+                              allow_redirects=True,
+                              headers={"User-Agent": "Mozilla/5.0 (compatible; MoiKinoteatrMediaPrep/2.0)"}) as response:
+                response.raise_for_status()
+                validate_redirect_chain(response)
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > MAX_SOURCE_BYTES:
+                    raise ValueError("Declared source size exceeds 3 GB safety limit")
+                with destination.open("wb") as output:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > MAX_SOURCE_BYTES:
+                            raise ValueError("Source download exceeded 3 GB safety limit")
+                        output.write(chunk)
+            if total:
+                return total
+            raise ValueError("Downloaded source is empty")
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            errors.append(f"{host}: {exc}")
+            logging.warning("Mirror %s failed; trying next approved mirror", host)
+    raise RuntimeError("All approved Blender mirrors failed: " + " | ".join(errors))
 
 
 def safe_extract_zip(archive, destination):
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     with zipfile.ZipFile(archive) as zf:
-        for member in zf.infolist():
+        members = zf.infolist()
+        if len(members) > MAX_ZIP_ENTRIES:
+            raise ValueError("ZIP contains too many entries")
+        if sum(m.file_size for m in members) > MAX_UNPACKED_BYTES:
+            raise ValueError("ZIP expanded size exceeds 5 GB safety limit")
+        for member in members:
             if member.is_dir():
                 continue
             target = (destination / member.filename).resolve()
             if target != root and root not in target.parents:
                 raise ValueError("Unsafe path in source ZIP archive")
+            mode = (member.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError("Symlink found in source ZIP archive")
         zf.extractall(destination)
 
 
 def probe(path):
     result = subprocess.run(
         [require_tool("ffprobe"), "-v", "error", "-show_format",
-         "-show_streams", "-of", "json", str(path)],
-        check=True, capture_output=True, text=True
-    )
+         "-show_streams", "-show_chapters", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True)
     data = json.loads(result.stdout)
-    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
     if not video:
         raise ValueError("Source has no video stream")
     duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
     if duration <= 0:
         raise ValueError("Could not determine source duration")
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    subtitles = [s for s in streams if s.get("codec_type") == "subtitle"]
     return {
         "duration_seconds": duration,
         "width": int(video.get("width", 0)),
         "height": int(video.get("height", 0)),
+        "frame_rate": video.get("avg_frame_rate") or video.get("r_frame_rate"),
         "video_codec": video.get("codec_name"),
-        "audio_streams": sum(1 for s in data.get("streams", []) if s.get("codec_type") == "audio"),
+        "pixel_format": video.get("pix_fmt"),
+        "audio_streams": len(audio),
+        "audio_codecs": [s.get("codec_name") for s in audio],
+        "audio_channels": [s.get("channels") for s in audio],
+        "subtitle_streams": len(subtitles),
+        "subtitle_codecs": [s.get("codec_name") for s in subtitles],
+        "chapter_count": len(data.get("chapters", [])),
     }
 
 
-def video_bitrate_kbps(duration_seconds, target_bytes=TARGET_BYTES):
-    # Reserve space for audio, MP4 muxing and metadata.
-    total_kbps = target_bytes * 8 / duration_seconds / 1000
-    bitrate = int(total_kbps - AUDIO_KBPS - 40)
-    if bitrate < 160:
-        raise ValueError("Runtime is too long for safe Telegram size at minimum video bitrate")
-    return bitrate
-
-
-def transcode(source, destination, source_duration):
+def transcode(source, destination, source_info, external_subtitle=None):
+    """Quality-based encode. Never upscales or shrinks to a fixed byte budget."""
     ffmpeg = require_tool("ffmpeg")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = destination.with_suffix(".working.mp4")
-    base_rate = video_bitrate_kbps(source_duration)
+    temp = destination.with_name(destination.stem + ".working.mp4")
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
+    if external_subtitle:
+        cmd += ["-i", str(external_subtitle)]
+    # Preserve every embedded subtitle stream in the prepared MP4, not only in
+    # the archived original master. The Blender Sintel source contains 10 SRT tracks.
+    cmd += ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-preset", VIDEO_PRESET, "-crf", str(VIDEO_CRF),
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k",
+            "-c:s", "mov_text", "-movflags", "+faststart"]
+    if external_subtitle:
+        cmd += ["-map", "1:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=rus"]
+    # Embedded source subtitle tracks remain intact in the preserved original master.
+    # The separately validated Russian SRT is muxed as MP4 timed text when supplied.
+    cmd += [str(temp)]
+    try:
+        subprocess.run(cmd, check=True)
+        final_probe = probe(temp)
+        duration = source_info["duration_seconds"]
+        if abs(final_probe["duration_seconds"] - duration) > max(2.0, duration * 0.005):
+            raise ValueError("Transcode duration differs from source; possible missing ending/credits")
+        temp.replace(destination)
+    finally:
+        temp.unlink(missing_ok=True)
+    size = destination.stat().st_size
+    return {
+        "output_bytes": size,
+        "output_sha256": sha256_file(destination),
+        "encoding": {"video": "H.264", "crf": VIDEO_CRF, "preset": VIDEO_PRESET,
+                     "audio": "AAC", "audio_bitrate_kbps": AUDIO_KBPS,
+                     "resolution_policy": "preserve source; never upscale"},
+        "probe": final_probe,
+        "local_bot_api_size_check": "within_1900MB_safety_margin" if size <= LOCAL_BOT_API_SAFE_BYTES else "exceeds_local_bot_api_safe_margin",
+    }
 
-    for attempt in range(4):
-        rate = max(160, int(base_rate * (0.90 ** attempt)))
-        passlog = destination.parent / (destination.stem + "_ffmpeg2pass")
-        common = [
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale='min(854,iw)':-2",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-b:v", f"{rate}k", "-maxrate", f"{rate}k", "-bufsize", f"{rate * 2}k",
-            "-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k", "-ac", "2",
-            "-map_metadata", "0", "-movflags", "+faststart",
-        ]
-        try:
-            subprocess.run(
-                common + ["-pass", "1", "-passlogfile", str(passlog),
-                          "-an", "-f", "mp4", "/dev/null"],
-                check=True
-            )
-            subprocess.run(
-                common + ["-pass", "2", "-passlogfile", str(passlog), str(temp)],
-                check=True
-            )
-            size = temp.stat().st_size
-            if size <= TARGET_BYTES:
-                final_probe = probe(temp)
-                if abs(final_probe["duration_seconds"] - source_duration) > max(2.0, source_duration * 0.005):
-                    raise ValueError("Transcode duration differs from source; credits may have been cut")
-                temp.replace(destination)
-                return {
-                    "output_bytes": size,
-                    "output_sha256": sha256_file(destination),
-                    "video_bitrate_kbps": rate,
-                    "probe": final_probe,
-                }
-        finally:
-            for suffix in (".log", ".log.mbtree"):
-                Path(str(passlog) + suffix).unlink(missing_ok=True)
-    temp.unlink(missing_ok=True)
-    raise ValueError("Could not encode below 48,000,000 bytes without violating minimum bitrate")
+
+def validate_srt(path, duration):
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    pattern = re.compile(
+        r"^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$",
+        re.MULTILINE)
+    cues = pattern.findall(text)
+    if not cues or not any(line.strip().isdigit() for line in text.splitlines()):
+        raise ValueError("Downloaded subtitle file does not look like valid SRT")
+    def to_ms(stamp):
+        h, m, rest = stamp.split(":")
+        s, ms = rest.split(",")
+        return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
+    previous = -1
+    for start, end in cues:
+        if to_ms(end) <= to_ms(start) or to_ms(start) < previous:
+            raise ValueError("Subtitle timestamps are invalid or out of order")
+        previous = to_ms(start)
+    if to_ms(cues[-1][1]) > duration * 1000 + 5000:
+        raise ValueError("Subtitle file extends beyond source film duration")
+    return len(cues)
 
 
 def process_candidate(candidate):
     cid = candidate["candidate_id"]
-    work_dir = WORK / cid
-    out_dir = OUTPUT / cid
+    work_dir, out_dir = WORK / cid, OUTPUT / cid
     work_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     source_url = safe_url(candidate["source_download_url"])
@@ -176,39 +236,45 @@ def process_candidate(candidate):
         media_path = max(videos, key=lambda p: p.stat().st_size)
 
     source_info = probe(media_path)
-    output_path = out_dir / f"{cid}.mp4"
-    encode_info = transcode(media_path, output_path, source_info["duration_seconds"])
+    # Keep byte-identical original master and downloaded package alongside the encode.
+    master_dir = out_dir / "original"
+    master_dir.mkdir(parents=True, exist_ok=True)
+    master_package = master_dir / source_path.name
+    shutil.copy2(source_path, master_package)
+    master_media = master_dir / media_path.name
+    if media_path != source_path:
+        shutil.copy2(media_path, master_media)
+    else:
+        master_media = master_package
 
-    subtitles = []
+    subtitle_path = None
+    subtitle_record = []
     subtitle_url = candidate.get("russian_subtitles_url")
     if subtitle_url:
         subtitle_path = out_dir / f"{cid}.ru.srt"
         subtitle_bytes = download(subtitle_url, subtitle_path)
-        text = subtitle_path.read_text(encoding="utf-8-sig", errors="replace")
-        if "-->" not in text or not any(line.strip().isdigit() for line in text.splitlines()):
-            raise ValueError("Downloaded subtitle file does not look like valid SRT")
-        subtitles.append({
-            "language": "ru",
-            "path": str(subtitle_path.relative_to(ROOT)),
-            "bytes": subtitle_bytes,
-            "sha256": sha256_file(subtitle_path),
-            "status": "downloaded_format_checked_not_human_reviewed",
+        cue_count = validate_srt(subtitle_path, source_info["duration_seconds"])
+        subtitle_record.append({
+            "language": "ru", "path": str(subtitle_path.relative_to(ROOT)),
+            "bytes": subtitle_bytes, "sha256": sha256_file(subtitle_path),
+            "cue_count": cue_count, "status": "format_checked_not_human_reviewed",
         })
 
+    output_path = out_dir / f"{cid}.mp4"
+    encode_info = transcode(media_path, output_path, source_info, subtitle_path)
     return {
-        "candidate_id": cid,
-        "title": candidate["title"],
-        "year": candidate["year"],
-        "source_url": source_url,
-        "source_bytes": source_bytes,
-        "source_sha256": sha256_file(source_path),
-        "source_media_file": str(media_path.relative_to(ROOT)),
-        "source_media_sha256": sha256_file(media_path),
+        "candidate_id": cid, "title": candidate["title"], "year": candidate["year"],
+        "source_url": source_url, "download_package_bytes": source_bytes,
+        "download_package_sha256": sha256_file(source_path),
+        "preserved_original_package": str(master_package.relative_to(ROOT)),
+        "preserved_original_media": str(master_media.relative_to(ROOT)),
+        "original_media_bytes": media_path.stat().st_size,
+        "original_media_sha256": sha256_file(media_path),
         "source_media_probe": source_info,
         "prepared_video": str(output_path.relative_to(ROOT)),
         **encode_info,
-        "subtitles": subtitles,
-        "credits_preservation": "full source duration retained; human visual end-credit verification still required",
+        "subtitles": subtitle_record,
+        "credits_preservation": "duration_checked_against_source; visual end-credit review still required",
         "content_review": "pending_human_full_film_review",
         "rights_review": "official_license_page_recorded; territory/legal review still required",
         "publication_approved": False,
@@ -217,12 +283,11 @@ def process_candidate(candidate):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--all", action="store_true", help="Prepare all queue candidates")
-    parser.add_argument("--candidate", help="Prepare one candidate_id")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--candidate")
     args = parser.parse_args()
     if not args.all and not args.candidate:
         parser.error("Use --all or --candidate")
-
     require_tool("ffmpeg")
     require_tool("ffprobe")
     queue = json.loads(QUEUE.read_text(encoding="utf-8"))
@@ -231,7 +296,6 @@ def main():
         candidates = [c for c in candidates if c.get("candidate_id") == args.candidate]
         if not candidates:
             raise SystemExit("Candidate not found")
-
     results = []
     for candidate in candidates:
         logging.info("Preparing %s", candidate["title"])
@@ -239,23 +303,23 @@ def main():
             results.append({"status": "prepared_not_approved", **process_candidate(candidate)})
         except Exception as exc:
             logging.exception("Preparation failed for %s", candidate["candidate_id"])
-            results.append({
-                "candidate_id": candidate["candidate_id"],
-                "title": candidate["title"],
-                "status": "failed",
-                "error": str(exc),
-                "publication_approved": False,
-            })
-
+            results.append({"candidate_id": candidate["candidate_id"], "title": candidate["title"],
+                            "status": "failed", "error": str(exc), "publication_approved": False})
     MANIFEST.write_text(json.dumps({
-        "schema_version": 1,
-        "target_max_bytes": TARGET_BYTES,
-        "note": "Preparation output is not approval. Every movie still requires full human content review and legal/territory rights review.",
+        "schema_version": 2,
+        "encoding_policy": "quality-based H.264 CRF 18; no 48 MB cap; original masters preserved",
+        "telegram_delivery": {
+            "standard_cloud_bot_api_max_upload_bytes": 50_000_000,
+            "self_hosted_local_bot_api_max_upload_bytes": 2_000_000_000,
+            "prepared_file_safe_margin_bytes": LOCAL_BOT_API_SAFE_BYTES,
+            "note": "Local Bot API infrastructure is not deployed by this preparation workflow. Files over the safe margin require a separate delivery/storage decision."
+        },
+        "note": "Preparation is not approval. Full human content review and legal/territory rights review remain mandatory. No Telegram publication is performed.",
         "results": results,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     failures = [r for r in results if r["status"] != "prepared_not_approved"]
-    logging.info("Prepared: %d; failed: %d; approved for publication: 0", len(results) - len(failures), len(failures))
+    logging.info("Prepared: %d; failed: %d; approved for publication: 0",
+                 len(results) - len(failures), len(failures))
     if failures:
         raise SystemExit(1)
 
