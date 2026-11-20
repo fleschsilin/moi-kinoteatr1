@@ -22,8 +22,10 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Start bot
+      - name: Start bot (safe mode)
         run: python bot.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          DRY_RUN: "true"
+          APPROVED_IDENTIFIERS: ""
