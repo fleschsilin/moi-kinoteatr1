@@ -65,7 +65,13 @@ def download(url, destination):
     safe_url(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
     total = 0
-    with requests.get(url, stream=True, timeout=(30, 180), allow_redirects=True) as response:
+    with requests.get(
+        url,
+        stream=True,
+        timeout=(30, 180),
+        allow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; MoiKinoteatrMediaPrep/1.0)"},
+    ) as response:
         response.raise_for_status()
         validate_redirect_chain(response)
         declared_size = response.headers.get("Content-Length")
