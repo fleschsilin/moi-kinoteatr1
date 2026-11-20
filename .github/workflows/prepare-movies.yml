@@ -37,14 +37,34 @@ jobs:
       - name: Download and prepare official source files
         run: python scripts/prepare_movies.py --all
 
-      - name: Upload original masters, prepared videos and manifest
+      - name: Upload lightweight manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prepared-open-movies-quality-master
+          name: movie-manifest
+          path: prepared_manifest.json
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 7
+
+      - name: Upload prepared MP4 videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-movie-videos
           path: |
-            prepared_movies/
-            prepared_manifest.json
+            prepared_movies/**/*.mp4
+            !prepared_movies/**/original/**
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload original source masters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-movie-masters
+          path: prepared_movies/**/original/**
           if-no-files-found: warn
           compression-level: 0
           retention-days: 7
