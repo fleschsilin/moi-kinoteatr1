@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import sys
 import unittest
@@ -95,6 +96,22 @@ class SafetyTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", code], env=env,
                                 text=True, capture_output=True, check=True)
         self.assertEqual(result.stdout.strip(), "false")
+
+
+    def test_research_queue_candidates_are_never_preapproved(self):
+        from pathlib import Path
+        queue = json.loads(
+            (Path(__file__).resolve().parents[1] / "film_research_queue.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(queue["schema_version"], 1)
+        self.assertGreaterEqual(len(queue["candidates"]), 1)
+        for candidate in queue["candidates"]:
+            with self.subTest(candidate=candidate["candidate_id"]):
+                self.assertEqual(candidate["approval_status"], "not_approved")
+                self.assertEqual(candidate["source_file_review_status"], "pending")
+                self.assertEqual(candidate["content_review_status"], "pending")
+                self.assertTrue(candidate["rights_evidence_url"].startswith("https://"))
 
 
 if __name__ == "__main__":
